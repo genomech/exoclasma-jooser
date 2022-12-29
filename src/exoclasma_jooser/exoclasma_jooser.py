@@ -79,25 +79,65 @@ def FindLigation(Sequence, SiteRegExp):
 	LigationPoints = tuple([Item for Item in ForwardEnds if Item in ReverseEnds])
 	return LigationPoints
 
+'''
+Extract:
+- Read number
+- Read primary or not
+- Read contig
+- Read position: its end if reverse-stranded, or its start otherwise.
+The start and the end are adjusted taking soft and hard clips into consideration.
+'''
+def ReadTyping(Read, ChromSizes):
+	Result = {}
+	Result['Number'] = 1 if Read.is_read1 else 2
+	Result['Primary'] = not (Read.is_secondary or Read.is_supplementary)
+	Result['Chr'] = str(Read.reference_name)
+	# Extract clipped ends
+	SoftOrHardClipped = (4, 5)
+	CigarFirst = item.cigar[0]
+	CigarLast = item.cigar[-1]
+	if not Read.is_reverse:
+		# Handle start
+		Start = Read.reference_start + 1
+		if CigarFirst[0] in SoftOrHardClipped:
+			Start -= CigarFirst[1]
+			if Start <= 0: Start = 1
+		Result['Pos'] = int(Start)
+	else:
+		# Handle end
+		End = Read.reference_end
+		if CigarLast[0] in SoftOrHardClipped:
+			End += CigarLast[1]
+			if End >= ChromSizes[item.reference_name]: End = ChromSizes[item.reference_name]
+		Result['Pos'] = int(End)
+	Result['Read'] = Read
+	return Result
+
 def CalculateDistance(Coord1, Coord2):
 	return float('+inf') if (Item1['Chr'] != Item2['Chr']) else abs(Item1['Pos'] - Item2['Pos'])
 
 def SortItems(Item1, Item2):
 	return tuple([(item['ID'], item['Pos']) for item in sorted([Item1, Item2], key = lambda x: (x['RefID'], x['Pos']))])
 
-def GetDT(Record):
+def GetDuplicationTag(Record):
 	if not Record.is_duplicate: return False
 	return dict(Record.tags)['DT']
 
-def ProcessQuery(Query, ChromSizes, MinMAPQ):
-	# Filter unmapped
-	DTs = [GetDT(item[1]) for item in Query['ReadBlock']]
-	if any([item == 'SQ' for item in DTs]): return { 'ReadBlock': Query['ReadBlock'], 'Type': 'OpticalDuplicates' }
-	if any([item == 'LB' for item in DTs]): return { 'ReadBlock': Query['ReadBlock'], 'Type': 'PcrDuplicates' }
-	if any([item[1].is_unmapped for item in Query['ReadBlock']]): return { 'ReadBlock': Query['ReadBlock'], 'Type': 'Unmapped' }
-	if any([item[1].mapping_quality < MinMAPQ for item in Query['ReadBlock']]): return { 'ReadBlock': Query['ReadBlock'], 'Type': 'MappingQualityFailed' }
+def ProcessQuery(Query, ChromSizes):
+	# Filter & count duplicates
+	DuplicationTags = [GetDuplicationTag(Item) for Item in Query['ReadBlock']]
+	if any([Item == 'SQ' for Item in DuplicationTags]):
+		Query['Type'] = 'Optical Duplicates'
+		return Query
+	if any([Item == 'LB' for Item in DuplicationTags]):
+		Query['Type'] = 'PCR Duplicates'
+		return Query
+	# Filter Unmapped
+	if any([Item.is_unmapped for Item in Query['ReadBlock']]):
+		Query['Type'] = 'Unmapped'
+		return Query
 	# Create Sorter
-	TypeDict = { index: list() for index in ('1p', '1s', '2p', '2s') }
+	TypeDict = { index: list() for index in ((1, True), '1s', '2p', '2s') }
 	# Annotation
 	for index, item in Query['ReadBlock']:
 		Start = item.reference_start + 1
@@ -147,8 +187,6 @@ def ProcessQuery(Query, ChromSizes, MinMAPQ):
 	return { 'ReadBlock': Query['ReadBlock'], 'Type': 'ChimericAmbiguous' }
 
 def JooserFunc(**kwargs):
-	logging.info(RenderParameters('*', '*'))
-	for Key, Value in kwargs.items(): logging.info(RenderParameters(Key, Value))
 	N = types.SimpleNamespace(**kwargs)
 	Input = pysam.AlignmentFile(N.Input_BAM, 'r', check_sq=False)
 	Output = GetMergeNoDupsSorter(N.MergedNoDups_File)
@@ -217,3 +255,8 @@ def JuicerTools(**kwargs):
 	RSString = '' if N.Restriction_Site_Map is None else f'-f "{N.Restriction_Site_Map}"'
 	Command = f'java -jar "{JUICERTOOLS_PATH}" pre -j {N.Threads} {RSString} "{N.MergedNoDups_File}" "{N.Output_HIC_File}" "{N.ChromSizes_File}"'
 	BashSubprocess(Name = 'JuicerTools', Command = Command)
+
+def main():
+	pass
+
+if __name__ == '__main__': main()
